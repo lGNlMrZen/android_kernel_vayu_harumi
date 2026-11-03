@@ -1,0 +1,169 @@
+name: Build Kernel Vayu (KSU-Next + SuSFS)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch kernel source"
+        default: "16"
+      defconfig:
+        description: "Defconfig (nama file di arch/arm64/configs)"
+        default: "vayu_defconfig"
+      ksu_branch:
+        description: "Branch KernelSU-Next (legacy_susfs atau legacy)"
+        default: "legacy_susfs"
+      susfs:
+        description: "Pasang patch SuSFS (true/false)"
+        default: "true"
+
+env:
+  KERNEL_REPO: https://github.com/lGNlMrZen/android_kernel_vayu_harumi
+  KSU_REPO: https://github.com/KernelSU-Next/KernelSU-Next
+  SUSFS_REPO: https://gitlab.com/simonpunk/susfs4ksu
+  SUSFS_BRANCH: kernel-4.14
+  ARCH: arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 340
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev libelf-dev build-essential \
+            ccache zip git curl lld python3 cpio dwarves device-tree-compiler \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 -b "${{ inputs.branch }}" "$KERNEL_REPO" kernel
+
+      - name: Setup clang
+        run: |
+          git clone --depth=1 --filter=blob:none --sparse \
+            -b master-kernel-build-2021 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            $HOME/clang-src
+          cd $HOME/clang-src
+          git sparse-checkout set clang-r416183b
+          echo "$HOME/clang-src/clang-r416183b/bin" >> $GITHUB_PATH
+          $HOME/clang-src/clang-r416183b/bin/clang --version | head -1
+
+      - name: Integrate KernelSU-Next
+        working-directory: kernel
+        run: |
+          git clone --depth=1 -b "${{ inputs.ksu_branch }}" "$KSU_REPO" KernelSU-Next \
+            || git clone --depth=1 -b legacy "$KSU_REPO" KernelSU-Next
+          git -C KernelSU-Next log -1 --oneline
+          ls KernelSU-Next
+          # sama seperti yang dilakukan setup.sh
+          ln -sfn ../KernelSU-Next/kernel drivers/kernelsu
+          grep -q kernelsu drivers/Makefile || echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
+          grep -q kernelsu drivers/Kconfig || sed -i '$i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          tail -3 drivers/Makefile
+          tail -3 drivers/Kconfig
+
+      - name: Apply SuSFS patches
+        if: ${{ inputs.susfs == 'true' }}
+        working-directory: kernel
+        run: |
+          git clone --depth=1 -b "$SUSFS_BRANCH" "$SUSFS_REPO" ../susfs4ksu
+          ls ../susfs4ksu/kernel_patches
+          cp -r ../susfs4ksu/kernel_patches/fs/* fs/
+          cp -r ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel*.patch ./susfs.patch
+          # tidak fatal: kalau ada hunk gagal, daftar .rej ditampilkan di log
+          patch -p1 --no-backup-if-mismatch < susfs.patch || true
+          echo "=== File .rej (hunk yang gagal) ==="
+          find . -name "*.rej" -print
+          echo "=== Hook KSU/SuSFS di source ==="
+          grep -rl "susfs" fs include drivers kernel 2>/dev/null | head -30
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-vayu-ksu-${{ github.run_id }}
+          restore-keys: ccache-vayu-
+
+      - name: Configure
+        working-directory: kernel
+        run: |
+          if [ ! -f "arch/arm64/configs/${{ inputs.defconfig }}" ]; then
+            echo "Defconfig tidak ditemukan. Daftar yang mirip:"
+            ls arch/arm64/configs | grep -i -E "vayu|sm8150|bhima" || ls arch/arm64/configs | head -50
+            exit 1
+          fi
+          {
+            echo "CONFIG_KSU=y"
+            echo "CONFIG_KPROBES=y"
+            echo "CONFIG_HAVE_KPROBES=y"
+            echo "CONFIG_KPROBE_EVENTS=y"
+          } >> arch/arm64/configs/${{ inputs.defconfig }}
+          if [ "${{ inputs.susfs }}" = "true" ]; then
+            {
+              echo "CONFIG_KSU_SUSFS=y"
+              echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_PATH=y"
+              echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y"
+              echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y"
+              echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y"
+              echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y"
+              echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+              echo "# CONFIG_KSU_SUSFS_SUS_SU is not set"
+            } >> arch/arm64/configs/${{ inputs.defconfig }}
+          fi
+          make O=out ARCH=$ARCH \
+            CC=clang CLANG_TRIPLE=aarch64-linux-gnu- \
+            "${{ inputs.defconfig }}"
+          echo "=== Hasil konfigurasi KSU/SuSFS/KPROBES ==="
+          grep -E "CONFIG_(KSU|KPROBES|KPROBE_EVENTS)" out/.config || true
+
+      - name: Build
+        working-directory: kernel
+        run: |
+          export CCACHE_DIR=$HOME/.ccache
+          ccache -M 5G
+          make -j$(nproc) O=out ARCH=$ARCH \
+            CC="ccache clang" \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            LD=ld.lld AR=llvm-ar NM=llvm-nm \
+            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+            KCFLAGS="-Wno-error" \
+            Image.gz-dtb 2>&1 | tee ../build.log
+          ls -lh out/arch/arm64/boot/
+
+      - name: Package AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AK3
+          python3 - <<'EOF'
+          import zlib
+          d = open('kernel/out/arch/arm64/boot/Image.gz-dtb','rb').read()
+          o = zlib.decompressobj(31)
+          open('AK3/Image','wb').write(o.decompress(d))
+          open('AK3/dtb.img','wb').write(o.unused_data)
+          EOF
+          cd AK3
+          sed -i 's/^kernel.string=.*/kernel.string=Vayu Kernel KSU-Next SuSFS by lGNlMrZen/' anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=vayu/' anykernel.sh
+          sed -i 's/^device.name2=.*/device.name2=bhima/' anykernel.sh
+          sed -i 's/^is_slot_device=.*/is_slot_device=auto/' anykernel.sh
+          rm -rf .git README.md
+          zip -r9 ../Vayu-KSUN-SuSFS-$(date +%Y%m%d).zip *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vayu-kernel-ksun-susfs
+          path: |
+            Vayu-KSUN-SuSFS-*.zip
+            build.log
