@@ -38,10 +38,14 @@ jobs:
 
       - name: Setup clang
         run: |
-          mkdir -p $HOME/clang
-          curl -sL "$CLANG_URL" | tar -xz -C $HOME/clang
-          echo "$HOME/clang/bin" >> $GITHUB_PATH
-          $HOME/clang/bin/clang --version | head -1
+          git clone --depth=1 --filter=blob:none --sparse \
+            -b master-kernel-build-2021 \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            $HOME/clang-src
+          cd $HOME/clang-src
+          git sparse-checkout set clang-r416183b
+          echo "$HOME/clang-src/clang-r416183b/bin" >> $GITHUB_PATH
+          $HOME/clang-src/clang-r416183b/bin/clang --version | head -1
 
       - name: Cache ccache
         uses: actions/cache@v4
