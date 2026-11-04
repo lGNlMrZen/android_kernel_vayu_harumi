@@ -130,7 +130,11 @@ jobs:
         run: |
           export CCACHE_DIR=$HOME/.ccache
           ccache -M 5G
+          : > ../build.log
+          # KernelSU-Next menambal fs/namespace.c saat build berjalan (setelah
+          # namespace.o terlanjur dikompilasi), jadi putaran ke-2 diperlukan.
           for i in 1 2; do
+            echo "=== PUTARAN BUILD $i ===" | tee -a ../build.log
             make -j$(nproc) O=out ARCH=$ARCH \
               CC="ccache clang" \
               CLANG_TRIPLE=aarch64-linux-gnu- \
