@@ -85,6 +85,53 @@ jobs:
           echo "=== Hook KSU/SuSFS di source ==="
           grep -rl "susfs" fs include drivers kernel 2>/dev/null | head -30
 
+      - name: Backport path_umount (kernel 4.14)
+        working-directory: kernel
+        run: |
+          cat > /tmp/can_umount.c <<'EOF'
+
+          static int can_umount(const struct path *path, int flags)
+          {
+          	struct mount *mnt = real_mount(path->mnt);
+
+          	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
+          		return -EINVAL;
+          	if (!may_mount())
+          		return -EPERM;
+          	if (path->dentry != path->mnt->mnt_root)
+          		return -EINVAL;
+          	if (!check_mnt(mnt))
+          		return -EINVAL;
+          	if (mnt->mnt.mnt_flags & MNT_LOCKED)
+          		return -EINVAL;
+          	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
+          		return -EPERM;
+          	return 0;
+          }
+          EOF
+          cat > /tmp/path_umount.c <<'EOF'
+
+          int path_umount(struct path *path, int flags)
+          {
+          	struct mount *mnt = real_mount(path->mnt);
+          	int ret;
+
+          	ret = can_umount(path, flags);
+          	if (!ret)
+          		ret = do_umount(mnt, flags);
+
+          	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
+          	dput(path->dentry);
+          	mntput_no_expire(mnt);
+          	return ret;
+          }
+          EOF
+          grep -q "int path_umount" fs/namespace.c || {
+            grep -q "can_umount" fs/namespace.c || cat /tmp/can_umount.c >> fs/namespace.c
+            cat /tmp/path_umount.c >> fs/namespace.c
+          }
+          grep -n "path_umount\|can_umount" fs/namespace.c
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
