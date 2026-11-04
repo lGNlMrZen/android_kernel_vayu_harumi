@@ -149,29 +149,22 @@ jobs:
           test -f out/arch/arm64/boot/Image.gz-dtb
           ls -lh out/arch/arm64/boot/
 
-      - name: Package AnyKernel3
+      - name: Extract Image
         run: |
-          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AK3
-          python3 - <<'EOF'
+          mkdir -p output
+          python3 - <<'EOF2'
           import zlib
           d = open('kernel/out/arch/arm64/boot/Image.gz-dtb','rb').read()
           o = zlib.decompressobj(31)
-          open('AK3/Image','wb').write(o.decompress(d))
-          open('AK3/dtb.img','wb').write(o.unused_data)
-          EOF
-          cd AK3
-          sed -i 's/^kernel.string=.*/kernel.string=Vayu Kernel KSU-Next SuSFS by lGNlMrZen/' anykernel.sh
-          sed -i 's/^device.name1=.*/device.name1=vayu/' anykernel.sh
-          sed -i 's/^device.name2=.*/device.name2=bhima/' anykernel.sh
-          sed -i 's/^is_slot_device=.*/is_slot_device=auto/' anykernel.sh
-          rm -rf .git README.md
-          zip -r9 ../Vayu-KSUN-SuSFS-$(date +%Y%m%d).zip *
+          open('output/Image','wb').write(o.decompress(d))
+          EOF2
+          ls -lh output/
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: vayu-kernel-ksun-susfs
+          name: vayu-image
           path: |
-            Vayu-KSUN-SuSFS-*.zip
+            output/Image
             build.log
