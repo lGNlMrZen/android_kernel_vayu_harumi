@@ -85,50 +85,6 @@ jobs:
           echo "=== Hook KSU/SuSFS di source ==="
           grep -rl "susfs" fs include drivers kernel 2>/dev/null | head -30
 
-      - name: Backport path_umount (kernel 4.14)
-        working-directory: kernel
-        run: |
-          if ! grep -q "^int path_umount" fs/namespace.c; then
-            if ! grep -q "can_umount" fs/namespace.c; then
-              {
-                echo ''
-                echo 'static int can_umount(const struct path *path, int flags)'
-                echo '{'
-                echo '    struct mount *mnt = real_mount(path->mnt);'
-                echo '    if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))'
-                echo '        return -EINVAL;'
-                echo '    if (!may_mount())'
-                echo '        return -EPERM;'
-                echo '    if (path->dentry != path->mnt->mnt_root)'
-                echo '        return -EINVAL;'
-                echo '    if (!check_mnt(mnt))'
-                echo '        return -EINVAL;'
-                echo '    if (mnt->mnt.mnt_flags & MNT_LOCKED)'
-                echo '        return -EINVAL;'
-                echo '    if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))'
-                echo '        return -EPERM;'
-                echo '    return 0;'
-                echo '}'
-              } >> fs/namespace.c
-            fi
-            {
-              echo ''
-              echo 'int path_umount(struct path *path, int flags)'
-              echo '{'
-              echo '    struct mount *mnt = real_mount(path->mnt);'
-              echo '    int ret;'
-              echo '    ret = can_umount(path, flags);'
-              echo '    if (!ret)'
-              echo '        ret = do_umount(mnt, flags);'
-              echo '    dput(path->dentry);'
-              echo '    mntput_no_expire(mnt);'
-              echo '    return ret;'
-              echo '}'
-            } >> fs/namespace.c
-          fi
-          grep -q "^int path_umount" fs/namespace.c || { echo "GAGAL: path_umount tidak masuk"; exit 1; }
-          tail -35 fs/namespace.c
-
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -174,15 +130,19 @@ jobs:
         run: |
           export CCACHE_DIR=$HOME/.ccache
           ccache -M 5G
-          make -j$(nproc) O=out ARCH=$ARCH \
-            CC="ccache clang" \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            CROSS_COMPILE=aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-            LD=ld.lld AR=llvm-ar NM=llvm-nm \
-            OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
-            KCFLAGS="-Wno-error" \
-            Image.gz-dtb 2>&1 | tee ../build.log
+          for i in 1 2; do
+            make -j$(nproc) O=out ARCH=$ARCH \
+              CC="ccache clang" \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              CROSS_COMPILE=aarch64-linux-gnu- \
+              CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+              LD=ld.lld AR=llvm-ar NM=llvm-nm \
+              OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip \
+              KCFLAGS="-Wno-error" \
+              Image.gz-dtb 2>&1 | tee -a ../build.log || true
+            [ -f out/arch/arm64/boot/Image.gz-dtb ] && break
+          done
+          test -f out/arch/arm64/boot/Image.gz-dtb
           ls -lh out/arch/arm64/boot/
 
       - name: Package AnyKernel3
