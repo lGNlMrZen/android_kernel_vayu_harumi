@@ -88,49 +88,46 @@ jobs:
       - name: Backport path_umount (kernel 4.14)
         working-directory: kernel
         run: |
-          cat > /tmp/can_umount.c <<'EOF'
-
-          static int can_umount(const struct path *path, int flags)
-          {
-          	struct mount *mnt = real_mount(path->mnt);
-
-          	if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))
-          		return -EINVAL;
-          	if (!may_mount())
-          		return -EPERM;
-          	if (path->dentry != path->mnt->mnt_root)
-          		return -EINVAL;
-          	if (!check_mnt(mnt))
-          		return -EINVAL;
-          	if (mnt->mnt.mnt_flags & MNT_LOCKED)
-          		return -EINVAL;
-          	if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))
-          		return -EPERM;
-          	return 0;
-          }
-          EOF
-          cat > /tmp/path_umount.c <<'EOF'
-
-          int path_umount(struct path *path, int flags)
-          {
-          	struct mount *mnt = real_mount(path->mnt);
-          	int ret;
-
-          	ret = can_umount(path, flags);
-          	if (!ret)
-          		ret = do_umount(mnt, flags);
-
-          	/* we mustn't call path_put() as that would clear mnt_expiry_mark */
-          	dput(path->dentry);
-          	mntput_no_expire(mnt);
-          	return ret;
-          }
-          EOF
-          grep -q "int path_umount" fs/namespace.c || {
-            grep -q "can_umount" fs/namespace.c || cat /tmp/can_umount.c >> fs/namespace.c
-            cat /tmp/path_umount.c >> fs/namespace.c
-          }
-          grep -n "path_umount\|can_umount" fs/namespace.c
+          if ! grep -q "^int path_umount" fs/namespace.c; then
+            if ! grep -q "can_umount" fs/namespace.c; then
+              {
+                echo ''
+                echo 'static int can_umount(const struct path *path, int flags)'
+                echo '{'
+                echo '    struct mount *mnt = real_mount(path->mnt);'
+                echo '    if (flags & ~(MNT_FORCE | MNT_DETACH | MNT_EXPIRE | UMOUNT_NOFOLLOW))'
+                echo '        return -EINVAL;'
+                echo '    if (!may_mount())'
+                echo '        return -EPERM;'
+                echo '    if (path->dentry != path->mnt->mnt_root)'
+                echo '        return -EINVAL;'
+                echo '    if (!check_mnt(mnt))'
+                echo '        return -EINVAL;'
+                echo '    if (mnt->mnt.mnt_flags & MNT_LOCKED)'
+                echo '        return -EINVAL;'
+                echo '    if (flags & MNT_FORCE && !capable(CAP_SYS_ADMIN))'
+                echo '        return -EPERM;'
+                echo '    return 0;'
+                echo '}'
+              } >> fs/namespace.c
+            fi
+            {
+              echo ''
+              echo 'int path_umount(struct path *path, int flags)'
+              echo '{'
+              echo '    struct mount *mnt = real_mount(path->mnt);'
+              echo '    int ret;'
+              echo '    ret = can_umount(path, flags);'
+              echo '    if (!ret)'
+              echo '        ret = do_umount(mnt, flags);'
+              echo '    dput(path->dentry);'
+              echo '    mntput_no_expire(mnt);'
+              echo '    return ret;'
+              echo '}'
+            } >> fs/namespace.c
+          fi
+          grep -q "^int path_umount" fs/namespace.c || { echo "GAGAL: path_umount tidak masuk"; exit 1; }
+          tail -35 fs/namespace.c
 
       - name: Cache ccache
         uses: actions/cache@v4
